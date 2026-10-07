@@ -1,0 +1,11 @@
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      EDGE_WEIGHT_MODE: ${EDGE_WEIGHT_MODE:-geographic}
+      DIRECTED_LINKS: ${DIRECTED_LINKS:-false}
+      DEFAULT_LINK: ${DEFAULT_LINK:-}
+      LOG_LEVEL: INFO
+    volumes:
+      - ./data:/srv/data:ro
