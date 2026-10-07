@@ -1,0 +1,4 @@
+[tool.ruff]
+line-length = 120
+[tool.ruff.lint]
+ignore = ["C408","E701","E702","E731"]
