@@ -4,7 +4,7 @@ services:
     expose: ["8000"]
     restart: unless-stopped
     environment:
-      EDGE_WEIGHT_MODE: ${EDGE_WEIGHT_MODE:-geographic}
+      EDGE_WEIGHT_MODE: ${EDGE_WEIGHT_MODE:-grid}
       DIRECTED_LINKS: ${DIRECTED_LINKS:-false}
       DEFAULT_LINK: ${DEFAULT_LINK:-}
       PRELOAD_LINKS: ${PRELOAD_LINKS:-link.txt}
