@@ -4,6 +4,7 @@ COORD_CHAIN = (
     "\n".join(f"{i/100:.6f} 0.000000 {(i+1)/100:.6f} 0.000000" for i in range(11))
     + "\n"
 )
+EXPECTED = {"locations": list(range(10))}
 
 
 def post(c, **kw):
@@ -16,19 +17,49 @@ def test_valid_search_returns_ten_in_graph_order(make_client):
     with make_client(ROWS, {"chain.txt": CHAIN}) as c:
         r = post(c)
         assert r.status_code == 200
-        assert r.json() == {"locations": list(range(10))}
+        assert r.json() == EXPECTED
 
 
 def test_coordinate_format_end_to_end(make_client):
     with make_client(ROWS, {"link.txt": COORD_CHAIN}) as c:
         r = post(c, link="link.txt")
         assert r.status_code == 200
-        assert r.json() == {"locations": list(range(10))}
+        assert r.json() == EXPECTED
 
 
 def test_coordinate_and_id_formats_give_same_result(make_client):
     with make_client(ROWS, {"chain.txt": CHAIN, "link.txt": COORD_CHAIN}) as c:
         assert post(c, link="chain.txt").json() == post(c, link="link.txt").json()
+
+
+def test_link_as_uploaded_file(make_client):
+    with make_client(ROWS, {"chain.txt": CHAIN}) as c:
+        data = dict(lat=0.0, long=0.0, cat="bank", rad=1.0)
+        r = c.post("/IP/search/", data=data, files={"link": ("link.txt", COORD_CHAIN)})
+        assert r.status_code == 200
+        assert r.json() == EXPECTED
+        r = c.post("/IP/search/", data=data, files={"link": ("chain.txt", CHAIN)})
+        assert r.json() == EXPECTED
+
+
+def test_link_inline_text_get_and_json(make_client):
+    with make_client(ROWS, {"chain.txt": CHAIN}) as c:
+        q = dict(lat=0.0, long=0.0, cat="bank", rad=1.0)
+        assert c.post("/IP/search/", data={**q, "link": CHAIN}).json() == EXPECTED
+        assert (
+            c.get("/IP/search/", params={**q, "link": "chain.txt"}).json() == EXPECTED
+        )
+        assert c.post("/IP/search/", json={**q, "link": "chain.txt"}).json() == EXPECTED
+        assert c.post("/IP/search", data={**q, "link": "chain.txt"}).json() == EXPECTED
+
+
+def test_different_uploaded_links_are_not_confused(make_client):
+    broken = "\n".join(f"{i} {i+1}" for i in range(5)) + "\n"
+    with make_client(ROWS, {"chain.txt": CHAIN}) as c:
+        q = dict(lat=0.0, long=0.0, cat="bank", rad=1.0)
+        a = c.post("/IP/search/", data=q, files={"link": ("a.txt", CHAIN)}).json()
+        b = c.post("/IP/search/", data=q, files={"link": ("b.txt", broken)}).json()
+        assert len(a["locations"]) == 10 and len(b["locations"]) == 6
 
 
 def test_category_and_radius_enforced(make_client):

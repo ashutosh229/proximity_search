@@ -2,7 +2,7 @@ import pytest
 from app.core.graph import Graph
 from app.core.shortest_path import distances_from, k_nearest_by_graph
 from app.core.spatial_index import NodeLocator, SpatialIndex, nearest_node
-from app.loaders.linkage_loader import load_graph
+from app.loaders.linkage_loader import load_graph, load_graph_text
 from app.loaders.location_loader import DatasetError, load_locations
 from app.models.location import Location
 from app.utils.distance import edge_weight, euclidean
@@ -51,6 +51,26 @@ def test_coordinate_linkage_format_is_lon_lat(tmp_path):
     assert g.stats["unknown_node"] == 1
     assert g.stats["malformed"] == 1
     assert g.stats["edges"] == 4
+
+
+def test_coordinate_snapping_tolerates_precision(tmp_path):
+    locs = {1: L(1, 0.0, 0.0), 2: L(2, 0.0, 0.010101)}
+    f = tmp_path / "l.txt"
+    f.write_text("0.0 0.0 0.01011 0.0\n")
+    g = load_graph(f, locs, "grid", directed=False)
+    assert [v for v, _ in g.adj[1]] == [2]
+    assert g.stats["unknown_node"] == 0
+
+
+def test_load_graph_text_matches_file(tmp_path):
+    locs = {i: L(i, 0.0, i / 100) for i in range(4)}
+    text = "0 1\n1 2\n2 3\n"
+    f = tmp_path / "l.txt"
+    f.write_text(text)
+    a = load_graph(f, locs, "grid", directed=False)
+    b = load_graph_text("\ufeff" + text, locs, "grid", directed=False)
+    assert a.adj == b.adj
+    assert b.identity.startswith("inline|")
 
 
 def test_directed_links(tmp_path):
