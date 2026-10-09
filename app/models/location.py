@@ -6,4 +6,4 @@ class Location:
     id: int
     lat: float
     lon: float
-    category: str  # normalised (casefolded, stripped)
+    category: str

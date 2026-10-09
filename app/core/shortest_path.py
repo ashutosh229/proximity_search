@@ -1,10 +1,7 @@
-"""Dijkstra with early termination after K accepted targets."""
 from __future__ import annotations
-
 import heapq
-from dataclasses import dataclass
-
 from app.core.graph import Graph
+from dataclasses import dataclass
 
 
 @dataclass
@@ -13,12 +10,9 @@ class SearchStats:
     relaxations: int = 0
 
 
-def k_nearest_by_graph(graph: Graph, source: int, targets: set[int], k: int) -> tuple[list[tuple[float, int]], SearchStats]:
-    """Return up to k (distance, id) pairs for `targets`, ascending by road distance.
-
-    One single-source run serves every candidate. Heap entries are (dist, id), so equal
-    distances finalize in ascending-ID order -> deterministic results.
-    """
+def k_nearest_by_graph(
+    graph: Graph, source: int, targets: set[int], k: int
+) -> tuple[list[tuple[float, int]], SearchStats]:
     stats = SearchStats()
     result: list[tuple[float, int]] = []
     if k <= 0 or not targets or not graph.has_node(source):
@@ -46,7 +40,6 @@ def k_nearest_by_graph(graph: Graph, source: int, targets: set[int], k: int) -> 
 
 
 def distances_from(graph: Graph, source: int) -> dict[int, float]:
-    """Full SSSP (used by tests as an independent oracle)."""
     dist = {source: 0.0}
     heap = [(0.0, source)]
     done = set()

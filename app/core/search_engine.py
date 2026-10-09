@@ -1,20 +1,16 @@
-"""Orchestrates: validate -> radius candidates -> query node -> Dijkstra -> top-K."""
-
 from __future__ import annotations
-
-import logging
 import threading
+from app.loaders.linkage_loader import file_identity, load_graph
+from app.loaders.location_loader import load_locations, normalise_category
+import logging
+from app.utils.metrics import Metrics
 import time
 from pathlib import Path
-
-from app.config import Settings
 from app.core.cache import LRUCache, RedisCache
 from app.core.graph import Graph
 from app.core.shortest_path import k_nearest_by_graph
+from app.config import Settings
 from app.core.spatial_index import NodeLocator, SpatialIndex
-from app.loaders.linkage_loader import file_identity, load_graph
-from app.loaders.location_loader import load_locations, normalise_category
-from app.utils.metrics import Metrics
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +43,7 @@ class SearchEngine:
             *self.s.preload_links,
             *([self.s.default_link] if self.s.default_link else []),
         }:
-            self.get_graph(link)  # warm
+            self.get_graph(link)
         dt = time.perf_counter() - t0
         self.metrics.set("ip_startup_seconds", dt)
         self.metrics.set("ip_locations_loaded", len(self.locations))
@@ -55,7 +51,6 @@ class SearchEngine:
         log.info("ready: %d locations in %.3fs", len(self.locations), dt)
 
     def resolve_link(self, link: str) -> Path:
-        """Resolve `link` strictly inside data_dir (no path traversal)."""
         try:
             base = self.s.data_dir.resolve()
             p = (base / link).resolve()
@@ -98,7 +93,6 @@ class SearchEngine:
             self.metrics.inc("ip_cache_hits_total")
             return list(cached)
         self.metrics.inc("ip_cache_misses_total")
-
         candidates = self.index.within_radius(lat, lon, cat, rad)
         if not candidates:
             self.results.put(key, ())

@@ -1,9 +1,6 @@
-"""Environment-driven configuration."""
-
 from __future__ import annotations
-
-import os
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 
 
@@ -27,11 +24,9 @@ class Settings:
     preload_links: tuple[str, ...] = field(
         default_factory=lambda: _csv("PRELOAD_LINKS")
     )
-    # "geographic": weight = euclidean length of the road; "grid": every link costs 1.
     edge_weight_mode: str = field(
         default_factory=lambda: os.getenv("EDGE_WEIGHT_MODE", "geographic")
     )
-    # Linkage semantics are unconfirmed -> configurable. Undirected is the usual road reading.
     directed_links: bool = field(default_factory=lambda: _bool("DIRECTED_LINKS", False))
     k: int = field(default_factory=lambda: int(os.getenv("TOP_K", "10")))
     cache_size: int = field(

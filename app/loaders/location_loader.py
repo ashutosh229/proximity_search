@@ -1,11 +1,8 @@
-"""Load and validate locations.csv: columns [ID, Latitude, Longitude, Category]."""
 from __future__ import annotations
-
 import csv
+from app.models.location import Location
 import math
 from pathlib import Path
-
-from app.models.location import Location
 
 
 class DatasetError(ValueError):
@@ -27,9 +24,13 @@ def load_locations(path: Path) -> dict[int, Location]:
             raise DatasetError("locations file is empty")
         cols = [h.strip().casefold() for h in header]
         try:
-            i_id, i_lat, i_lon, i_cat = (cols.index(n) for n in ("id", "latitude", "longitude", "category"))
+            i_id, i_lat, i_lon, i_cat = (
+                cols.index(n) for n in ("id", "latitude", "longitude", "category")
+            )
         except ValueError as e:
-            raise DatasetError(f"locations header must contain ID, Latitude, Longitude, Category; got {header}") from e
+            raise DatasetError(
+                f"locations header must contain ID, Latitude, Longitude, Category; got {header}"
+            ) from e
         for n, row in enumerate(reader, start=2):
             if not row or all(not c.strip() for c in row):
                 continue

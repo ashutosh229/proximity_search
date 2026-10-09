@@ -1,10 +1,4 @@
-"""Prometheus metrics; multiprocess-aware when PROMETHEUS_MULTIPROC_DIR is set."""
-
 from __future__ import annotations
-
-import os
-import threading
-
 from prometheus_client import (
     CollectorRegistry,
     Counter,
@@ -13,6 +7,8 @@ from prometheus_client import (
     generate_latest,
     multiprocess,
 )
+import os
+import threading
 
 
 class Metrics:
@@ -20,9 +16,7 @@ class Metrics:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.registry = (
-            CollectorRegistry()
-        )  # per instance -> no collisions when create_app runs repeatedly (tests)
+        self.registry = CollectorRegistry()
         self._c: dict[str, Counter] = {}
         self._g: dict[str, Gauge] = {}
         self._lat = Histogram(

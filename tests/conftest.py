@@ -1,11 +1,9 @@
 import csv
-from pathlib import Path
-
 import pytest
-from fastapi.testclient import TestClient
-
 from app.config import Settings
+from fastapi.testclient import TestClient
 from app.main import create_app
+from pathlib import Path
 
 
 def write_locations(path: Path, rows):
@@ -23,4 +21,5 @@ def make_client(tmp_path):
             (tmp_path / name).write_text(text)
         app = create_app(Settings(data_dir=tmp_path, **kw))
         return TestClient(app)
+
     return _make

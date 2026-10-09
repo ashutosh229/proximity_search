@@ -1,4 +1,3 @@
-# 12 banks on a line at lat 0, lon = i/100; node ids 0..11, plus one hospital.
 ROWS = [(i, 0.0, i / 100, "bank") for i in range(12)] + [(100, 0.0, 0.0, "hospital")]
 CHAIN = "\n".join(f"{i} {i+1}" for i in range(11)) + "\n"
 
@@ -21,15 +20,14 @@ def test_category_and_radius_enforced(make_client):
         assert post(c, cat="hospital").json()["locations"] in (
             [],
             [100],
-        )  # isolated node: reachable only if it is the source
+        )
         ids = post(c, rad=0.05).json()["locations"]
-        assert all(i <= 5 for i in ids)  # lon <= 0.05
-        ids = post(c, cat="BANK").json()["locations"]  # case-insensitive category
+        assert all(i <= 5 for i in ids)
+        ids = post(c, cat="BANK").json()["locations"]
         assert len(ids) == 10
 
 
 def test_ranking_uses_road_distance_not_euclid(make_client):
-    # Query at node 0. Node 1 is Euclid-close but road-far (long detour); node 2 slightly farther but linked directly.
     rows = [
         (0, 0.0, 0.0, "bank"),
         (1, 0.0, 0.01, "bank"),
@@ -51,15 +49,12 @@ def test_changing_topology_changes_result(make_client):
     with make_client(rows, {"a.txt": forward, "b.txt": broken}) as c:
         a = post(c, link="a.txt").json()["locations"]
         b = post(c, link="b.txt").json()["locations"]
-        assert (
-            len(a) == 10 and len(b) == 6 and a != b
-        )  # unreachable nodes cannot be returned
+        assert len(a) == 10 and len(b) == 6 and a != b
 
 
 def test_grid_mode_unit_weights(make_client):
     rows = [(0, 0, 0, "bank"), (1, 0, 0.9, "bank"), (2, 0, 0.1, "bank")]
     with make_client(rows, {"l.txt": "0 1\n0 2\n"}, edge_weight_mode="grid") as c:
-        # equal unit weight -> tie broken by ID; geographic would give [0,2,1]
         assert post(c, link="l.txt").json()["locations"] == [0, 1, 2]
     with make_client(rows, {"l.txt": "0 1\n0 2\n"}, edge_weight_mode="geographic") as c:
         assert post(c, link="l.txt").json()["locations"] == [0, 2, 1]

@@ -1,11 +1,9 @@
 import hmac
 import math
-import time
-
-from fastapi import APIRouter, Form, Header, HTTPException, Request
-
-from app.core.search_engine import LinkageNotFound
 from app.models.request import SearchResponse
+import time
+from fastapi import APIRouter, Form, Header, HTTPException, Request
+from app.core.search_engine import LinkageNotFound
 
 router = APIRouter()
 

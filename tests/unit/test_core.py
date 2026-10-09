@@ -1,5 +1,4 @@
 import pytest
-
 from app.core.graph import Graph
 from app.core.shortest_path import distances_from, k_nearest_by_graph
 from app.core.spatial_index import NodeLocator, SpatialIndex, nearest_node
@@ -29,9 +28,9 @@ def test_linkage_policies(tmp_path):
     assert g.stats["malformed"] == 2
     assert g.stats["self_loops"] == 1
     assert g.stats["unknown_node"] == 1
-    assert g.stats["duplicates"] >= 2  # 1-0 duplicates 0-1 in both directions
+    assert g.stats["duplicates"] >= 2
     assert sorted(v for v, _ in g.adj[1]) == [0, 2]
-    assert g.adj[3] == []  # isolated node still present
+    assert g.adj[3] == []
 
 
 def test_directed_links(tmp_path):
@@ -43,7 +42,6 @@ def test_directed_links(tmp_path):
 
 
 def test_dijkstra_matches_oracle_and_stops_early():
-    # path graph 0-1-2-3-4 plus shortcut 0-4 of weight 10
     adj = {i: [] for i in range(5)}
 
     def add(a, b, w):
@@ -56,9 +54,9 @@ def test_dijkstra_matches_oracle_and_stops_early():
     g = Graph(adj=adj)
     res, st = k_nearest_by_graph(g, 0, {1, 2, 3, 4}, 2)
     assert res == [(1.0, 1), (2.0, 2)]
-    assert st.finalized == 3  # source + two targets, early exit
+    assert st.finalized == 3
     d = distances_from(g, 0)
-    assert d[4] == 4.0  # road path beats the 10-weight direct link
+    assert d[4] == 4.0
     res, _ = k_nearest_by_graph(g, 0, {4}, 5)
     assert res == [(4.0, 4)]
 
@@ -85,7 +83,6 @@ def test_spatial_index_matches_bruteforce_and_inclusive_boundary():
         assert idx.within_radius(0.3, 0.3, "a", rad) == idx.within_radius(
             0.3, 0.3, "a", rad, brute=True
         )
-    # boundary point exactly at distance 0.1 must be included
     assert {23, 43} <= idx.within_radius(0.3, 0.3, "a", 0.1)
     assert idx.within_radius(0.3, 0.3, "zzz", 1) == set()
 

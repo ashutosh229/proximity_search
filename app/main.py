@@ -1,14 +1,12 @@
 import json
-import logging
-import time
 import uuid
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, Response
-
-from app.api.search import router
 from app.config import Settings
 from app.core.search_engine import SearchEngine
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Response
+from app.api.search import router
+import logging
+import time
 from app.utils.metrics import Metrics
 
 access_log = logging.getLogger("access")

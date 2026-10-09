@@ -1,20 +1,8 @@
-"""Parse a linkage TXT file ("a b" per line) into a Graph.
-
-Deterministic policies (counted in graph.stats):
-  * malformed line (not exactly two ints)  -> skipped
-  * unknown node id                        -> skipped
-  * self-loop                              -> skipped
-  * duplicate link                         -> collapsed (smallest weight kept)
-  * undirected (default): both directions stored; directed: a->b only
-Every location gets an adjacency entry, so isolated nodes are still valid sources.
-"""
 from __future__ import annotations
-
 import logging
-from pathlib import Path
-
 from app.core.graph import Graph
 from app.models.location import Location
+from pathlib import Path
 from app.utils.distance import edge_weight
 
 log = logging.getLogger(__name__)
@@ -25,8 +13,12 @@ def file_identity(path: Path, mode: str, directed: bool) -> str:
     return f"{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{mode}|{'d' if directed else 'u'}"
 
 
-def load_graph(path: Path, locations: dict[int, Location], mode: str, directed: bool) -> Graph:
-    stats = dict(lines=0, edges=0, malformed=0, unknown_node=0, self_loops=0, duplicates=0)
+def load_graph(
+    path: Path, locations: dict[int, Location], mode: str, directed: bool
+) -> Graph:
+    stats = dict(
+        lines=0, edges=0, malformed=0, unknown_node=0, self_loops=0, duplicates=0
+    )
     best: dict[tuple[int, int], float] = {}
     with path.open(encoding="utf-8-sig") as f:
         for raw in f:

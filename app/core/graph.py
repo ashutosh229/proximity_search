@@ -1,12 +1,9 @@
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 
 
 @dataclass
 class Graph:
-    """Sparse adjacency-list graph. adj[u] = [(v, weight), ...]."""
-
     adj: dict[int, list[tuple[int, float]]] = field(default_factory=dict)
     identity: str = ""
     stats: dict[str, int] = field(default_factory=dict)

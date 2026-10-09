@@ -1,9 +1,10 @@
 import json
 import logging
-import threading
-from collections import OrderedDict
 from collections.abc import Hashable
 from typing import Any
+import threading
+import redis
+from collections import OrderedDict
 
 log = logging.getLogger(__name__)
 
@@ -40,11 +41,7 @@ class LRUCache:
 
 
 class RedisCache:
-    """Shared result cache across workers/replicas. Fails open: Redis/serialization errors = cache miss."""
-
     def __init__(self, url: str, ttl: int = 3600):
-        import redis
-
         self._err = (redis.RedisError, ValueError)
         self.r = redis.Redis.from_url(
             url, socket_timeout=0.05, socket_connect_timeout=0.05

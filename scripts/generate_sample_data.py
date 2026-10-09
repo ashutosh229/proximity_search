@@ -1,8 +1,3 @@
-"""Generate a synthetic locations.csv (100x100 grid) and a links.txt for local testing.
-
-The real linkage file was not supplied, so this is ONLY a stand-in. Links are a random
-sparse subset of grid-neighbour pairs (so some direct roads are missing, as the spec says).
-"""
 import argparse
 import csv
 import random
@@ -27,7 +22,9 @@ with (out / "locations.csv").open("w", newline="") as f:
     w.writerow(["ID", "Latitude", "Longitude", "Category"])
     for i in range(n):
         for j in range(n):
-            w.writerow([i * n + j, round(i * step, 6), round(j * step, 6), rnd.choice(CATS)])
+            w.writerow(
+                [i * n + j, round(i * step, 6), round(j * step, 6), rnd.choice(CATS)]
+            )
 with (out / "links.txt").open("w") as f:
     for i in range(n):
         for j in range(n):
