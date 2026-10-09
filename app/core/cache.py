@@ -1,3 +1,4 @@
+import json
 import threading
 from collections import OrderedDict
 from collections.abc import Hashable
@@ -31,4 +32,33 @@ class LRUCache:
                 self._d.popitem(last=False)
 
     def __len__(self):
-        return len(self._d)
+        with self._lock:
+            return len(self._d)
+
+
+class RedisCache:
+    """Shared result cache across workers/replicas. Fails open: any Redis error = cache miss."""
+
+    def __init__(self, url: str, ttl: int = 3600):
+        import redis
+
+        self.r = redis.Redis.from_url(
+            url, socket_timeout=0.05, socket_connect_timeout=0.05
+        )
+        self.ttl = ttl
+
+    def get(self, key: Hashable):
+        try:
+            v = self.r.get("ip:" + repr(key))
+            return tuple(json.loads(v)) if v is not None else None
+        except Exception:
+            return None
+
+    def put(self, key: Hashable, value: Any):
+        try:
+            self.r.setex("ip:" + repr(key), self.ttl, json.dumps(list(value)))
+        except Exception:
+            pass
+
+    def __len__(self):
+        return 0
