@@ -3,7 +3,7 @@ import csv
 import random
 from pathlib import Path
 
-CATS = ["bank", "hospital", "restaurant", "school", "pharmacy"]
+CATS = ["bank", "hospital", "restaurant", "school", "pharmacy", "store", "park", "cafe"]
 
 p = argparse.ArgumentParser()
 p.add_argument("--out", default="data")
@@ -17,20 +17,27 @@ out = Path(a.out)
 out.mkdir(parents=True, exist_ok=True)
 n = a.n
 step = 1.0 / (n - 1)
+
+
+def c(k: int) -> str:
+    return f"{k * step:.6f}"
+
+
 with (out / "locations.csv").open("w", newline="") as f:
     w = csv.writer(f)
     w.writerow(["ID", "Latitude", "Longitude", "Category"])
     for i in range(n):
         for j in range(n):
-            w.writerow(
-                [i * n + j, round(i * step, 6), round(j * step, 6), rnd.choice(CATS)]
-            )
-with (out / "link.txt").open("w") as f:
-    for i in range(n):
-        for j in range(n):
-            u = i * n + j
-            if j + 1 < n and rnd.random() < a.keep:
-                f.write(f"{u} {u + 1}\n")
-            if i + 1 < n and rnd.random() < a.keep:
-                f.write(f"{u} {u + n}\n")
-print(f"wrote {n*n} locations and links to {out}/")
+            w.writerow([i * n + j + 1, c(i), c(j), rnd.choice(CATS)])
+
+
+lines = []
+for i in range(n):
+    for j in range(n):
+        if j + 1 < n and rnd.random() < a.keep:
+            lines.append(f"{c(j)} {c(i)} {c(j + 1)} {c(i)}")
+        if i + 1 < n and rnd.random() < a.keep:
+            lines.append(f"{c(j)} {c(i)} {c(j)} {c(i + 1)}")
+rnd.shuffle(lines)
+(out / "link.txt").write_text("\n".join(lines) + "\n")
+print(f"wrote {n*n} locations and {len(lines)} links to {out}/")
