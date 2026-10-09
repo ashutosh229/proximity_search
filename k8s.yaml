@@ -15,7 +15,7 @@ spec:
           ports: [{ containerPort: 8000 }]
           env:
             - { name: WEB_CONCURRENCY, value: "2" }
-            - { name: PRELOAD_LINKS, value: "links.txt" }
+            - { name: PRELOAD_LINKS, value: "link.txt" }
             # - { name: REDIS_URL, value: "redis://redis:6379/0" }
             # - { name: API_KEY, valueFrom: { secretKeyRef: { name: ps-secret, key: api-key } } }
           resources:

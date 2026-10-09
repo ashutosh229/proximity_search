@@ -25,7 +25,7 @@ with (out / "locations.csv").open("w", newline="") as f:
             w.writerow(
                 [i * n + j, round(i * step, 6), round(j * step, 6), rnd.choice(CATS)]
             )
-with (out / "links.txt").open("w") as f:
+with (out / "link.txt").open("w") as f:
     for i in range(n):
         for j in range(n):
             u = i * n + j

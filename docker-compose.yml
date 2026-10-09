@@ -7,7 +7,7 @@ services:
       EDGE_WEIGHT_MODE: ${EDGE_WEIGHT_MODE:-geographic}
       DIRECTED_LINKS: ${DIRECTED_LINKS:-false}
       DEFAULT_LINK: ${DEFAULT_LINK:-}
-      PRELOAD_LINKS: ${PRELOAD_LINKS:-links.txt}
+      PRELOAD_LINKS: ${PRELOAD_LINKS:-link.txt}
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
       API_KEY: ${API_KEY:-}
       REDIS_URL: ${REDIS_URL:-}

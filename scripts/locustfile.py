@@ -16,6 +16,6 @@ class User(HttpUser):
                     ["bank", "hospital", "restaurant", "school", "pharmacy"]
                 ),
                 rad=random.choice([0.1, 0.2, 0.4]),
-                link="links.txt",
+                link="link.txt",
             ),
         )

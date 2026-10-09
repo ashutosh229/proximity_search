@@ -26,7 +26,7 @@ jobs:
       - run: |
           docker run -d -p 8000:8000 --name ps "$IMAGE"
           for i in $(seq 1 30); do curl -sf localhost:8000/ready && break || sleep 1; done
-          curl -sf -X POST localhost:8000/IP/search/ -d "lat=0.5&long=0.5&cat=bank&rad=0.3&link=links.txt"
+          curl -sf -X POST localhost:8000/IP/search/ -d "lat=0.5&long=0.5&cat=bank&rad=0.3&link=link.txt"
           curl -sf localhost:8000/metrics | grep ip_requests_total
       - name: Trivy image scan
         run: |

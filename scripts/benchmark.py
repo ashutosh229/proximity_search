@@ -14,7 +14,7 @@ def pct(xs, p):
     return xs[min(len(xs) - 1, int(len(xs) * p / 100))] * 1000
 
 
-link = sys.argv[1] if len(sys.argv) > 1 else "links.txt"
+link = sys.argv[1] if len(sys.argv) > 1 else "link.txt"
 n = int(sys.argv[2]) if len(sys.argv) > 2 else 500
 e = SearchEngine(Settings(cache_size=0))
 e.startup()

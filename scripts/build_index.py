@@ -8,7 +8,7 @@ from app.config import Settings
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-link = sys.argv[1] if len(sys.argv) > 1 else "links.txt"
+link = sys.argv[1] if len(sys.argv) > 1 else "link.txt"
 t = time.perf_counter()
 e = SearchEngine(Settings())
 e.startup()
