@@ -1,8 +1,18 @@
-"""Tiny dependency-free metrics registry with Prometheus text exposition."""
+"""Prometheus metrics; multiprocess-aware when PROMETHEUS_MULTIPROC_DIR is set."""
+
 from __future__ import annotations
 
+import os
 import threading
-from collections import defaultdict
+
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+    multiprocess,
+)
 
 
 class Metrics:
@@ -10,44 +20,46 @@ class Metrics:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.counters: dict[str, float] = defaultdict(float)
-        self.gauges: dict[str, float] = {}
-        self._lat_counts = [0] * (len(self.LATENCY_BUCKETS) + 1)
-        self._lat_sum = 0.0
-        self._lat_n = 0
+        self.registry = (
+            CollectorRegistry()
+        )  # per instance -> no collisions when create_app runs repeatedly (tests)
+        self._c: dict[str, Counter] = {}
+        self._g: dict[str, Gauge] = {}
+        self._lat = Histogram(
+            "ip_request_latency_seconds",
+            "request latency",
+            buckets=self.LATENCY_BUCKETS,
+            registry=self.registry,
+        )
 
     def inc(self, name: str, v: float = 1.0):
-        with self._lock:
-            self.counters[name] += v
+        c = self._c.get(name)
+        if c is None:
+            with self._lock:
+                c = self._c.get(name)
+                if c is None:
+                    c = self._c[name] = Counter(
+                        name.removesuffix("_total"), name, registry=self.registry
+                    )
+        c.inc(v)
 
     def set(self, name: str, v: float):
-        with self._lock:
-            self.gauges[name] = v
+        g = self._g.get(name)
+        if g is None:
+            with self._lock:
+                g = self._g.get(name)
+                if g is None:
+                    g = self._g[name] = Gauge(
+                        name, name, registry=self.registry, multiprocess_mode="max"
+                    )
+        g.set(v)
 
     def observe_latency(self, seconds: float):
-        with self._lock:
-            self._lat_sum += seconds
-            self._lat_n += 1
-            for i, b in enumerate(self.LATENCY_BUCKETS):
-                if seconds <= b:
-                    self._lat_counts[i] += 1
-                    return
-            self._lat_counts[-1] += 1
+        self._lat.observe(seconds)
 
-    def render(self) -> str:
-        with self._lock:
-            out = []
-            for k, v in sorted(self.counters.items()):
-                out += [f"# TYPE {k} counter", f"{k} {v}"]
-            for k, v in sorted(self.gauges.items()):
-                out += [f"# TYPE {k} gauge", f"{k} {v}"]
-            out.append("# TYPE ip_request_latency_seconds histogram")
-            cum = 0
-            for b, c in zip(self.LATENCY_BUCKETS, self._lat_counts):
-                cum += c
-                out.append(f'ip_request_latency_seconds_bucket{{le="{b}"}} {cum}')
-            cum += self._lat_counts[-1]
-            out.append(f'ip_request_latency_seconds_bucket{{le="+Inf"}} {cum}')
-            out.append(f"ip_request_latency_seconds_sum {self._lat_sum}")
-            out.append(f"ip_request_latency_seconds_count {self._lat_n}")
-            return "\n".join(out) + "\n"
+    def render(self) -> bytes:
+        if os.getenv("PROMETHEUS_MULTIPROC_DIR"):
+            reg = CollectorRegistry()
+            multiprocess.MultiProcessCollector(reg)
+            return generate_latest(reg)
+        return generate_latest(self.registry)
