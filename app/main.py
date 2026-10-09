@@ -1,4 +1,7 @@
+import json
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
@@ -8,10 +11,15 @@ from app.config import Settings
 from app.core.search_engine import SearchEngine
 from app.utils.metrics import Metrics
 
+access_log = logging.getLogger("access")
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
-    logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.basicConfig(
+        level=settings.log_level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     metrics = Metrics()
     engine = SearchEngine(settings, metrics)
 
@@ -23,6 +31,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Proximity Search API", lifespan=lifespan)
     app.state.engine = engine
     app.include_router(router)
+
+    @app.middleware("http")
+    async def request_log(request, call_next):
+        rid = request.headers.get("x-request-id") or uuid.uuid4().hex
+        t = time.perf_counter()
+        resp = await call_next(request)
+        resp.headers["x-request-id"] = rid
+        access_log.info(
+            json.dumps(
+                {
+                    "rid": rid,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": resp.status_code,
+                    "ms": round((time.perf_counter() - t) * 1000, 2),
+                }
+            )
+        )
+        return resp
 
     @app.get("/health")
     def health():
