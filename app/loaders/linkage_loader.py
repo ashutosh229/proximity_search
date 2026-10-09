@@ -1,16 +1,30 @@
 from __future__ import annotations
 import logging
+import math
 from app.core.graph import Graph
 from app.models.location import Location
 from pathlib import Path
 from app.utils.distance import edge_weight
 
 log = logging.getLogger(__name__)
+_SCALE = 1_000_000
 
 
 def file_identity(path: Path, mode: str, directed: bool) -> str:
     st = path.stat()
     return f"{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{mode}|{'d' if directed else 'u'}"
+
+
+def _q(x: float) -> int:
+    return round(x * _SCALE)
+
+
+def _coord_index(locations: dict[int, Location]) -> dict[tuple[int, int], int]:
+    idx: dict[tuple[int, int], int] = {}
+    for lid in sorted(locations):
+        l = locations[lid]
+        idx.setdefault((_q(l.lat), _q(l.lon)), lid)
+    return idx
 
 
 def load_graph(
@@ -19,6 +33,7 @@ def load_graph(
     stats = dict(
         lines=0, edges=0, malformed=0, unknown_node=0, self_loops=0, duplicates=0
     )
+    coord_idx = _coord_index(locations)
     best: dict[tuple[int, int], float] = {}
     with path.open(encoding="utf-8-sig") as f:
         for raw in f:
@@ -28,9 +43,16 @@ def load_graph(
             stats["lines"] += 1
             parts = line.replace(",", " ").split()
             try:
-                if len(parts) != 2:
+                if len(parts) == 4:
+                    lon_a, lat_a, lon_b, lat_b = (float(p) for p in parts)
+                    if not all(map(math.isfinite, (lon_a, lat_a, lon_b, lat_b))):
+                        raise ValueError
+                    a = coord_idx.get((_q(lat_a), _q(lon_a)))
+                    b = coord_idx.get((_q(lat_b), _q(lon_b)))
+                elif len(parts) == 2:
+                    a, b = int(parts[0]), int(parts[1])
+                else:
                     raise ValueError
-                a, b = int(parts[0]), int(parts[1])
             except ValueError:
                 stats["malformed"] += 1
                 continue
