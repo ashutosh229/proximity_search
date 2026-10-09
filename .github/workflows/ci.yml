@@ -1,5 +1,8 @@
 name: ci
 on: [push, pull_request]
+permissions:
+  contents: read
+  packages: write
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -7,8 +10,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - run: ruff check app tests scripts
+      - run: pip-audit -r requirements.txt
       - run: pytest tests/unit -q
       - run: pytest tests/integration tests/benchmark -q
   docker:
@@ -17,8 +21,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python scripts/generate_sample_data.py --out data
-      - run: docker build -t proximity-search .
+      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+      - run: docker build -t "$IMAGE" .
       - run: |
-          docker run -d -p 8000:8000 --name ps proximity-search
-          for i in $(seq 1 20); do curl -sf localhost:8000/ready && break || sleep 1; done
+          docker run -d -p 8000:8000 --name ps "$IMAGE"
+          for i in $(seq 1 30); do curl -sf localhost:8000/ready && break || sleep 1; done
           curl -sf -X POST localhost:8000/IP/search/ -d "lat=0.5&long=0.5&cat=bank&rad=0.3&link=links.txt"
+          curl -sf localhost:8000/metrics | grep -q ip_requests_total
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+      - uses: docker/login-action@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: github.ref == 'refs/heads/main'
+        run: docker push "$IMAGE"
+  
