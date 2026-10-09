@@ -1,9 +1,8 @@
-
 import pytest
 
 from app.core.graph import Graph
 from app.core.shortest_path import distances_from, k_nearest_by_graph
-from app.core.spatial_index import SpatialIndex, nearest_node
+from app.core.spatial_index import NodeLocator, SpatialIndex, nearest_node
 from app.loaders.linkage_loader import load_graph
 from app.loaders.location_loader import DatasetError, load_locations
 from app.models.location import Location
@@ -46,8 +45,11 @@ def test_directed_links(tmp_path):
 def test_dijkstra_matches_oracle_and_stops_early():
     # path graph 0-1-2-3-4 plus shortcut 0-4 of weight 10
     adj = {i: [] for i in range(5)}
+
     def add(a, b, w):
-        adj[a].append((b, w)); adj[b].append((a, w))
+        adj[a].append((b, w))
+        adj[b].append((a, w))
+
     for i in range(4):
         add(i, i + 1, 1.0)
     add(0, 4, 10.0)
@@ -74,10 +76,15 @@ def test_unreachable_targets_not_returned():
 
 
 def test_spatial_index_matches_bruteforce_and_inclusive_boundary():
-    locs = {i: L(i, (i % 10) / 10, (i // 10) / 10, "a" if i % 2 else "b") for i in range(100)}
+    locs = {
+        i: L(i, (i % 10) / 10, (i // 10) / 10, "a" if i % 2 else "b")
+        for i in range(100)
+    }
     idx = SpatialIndex(locs)
     for rad in (0.0, 0.1, 0.25, 0.5):
-        assert idx.within_radius(0.3, 0.3, "a", rad) == idx.within_radius(0.3, 0.3, "a", rad, brute=True)
+        assert idx.within_radius(0.3, 0.3, "a", rad) == idx.within_radius(
+            0.3, 0.3, "a", rad, brute=True
+        )
     # boundary point exactly at distance 0.1 must be included
     assert {23, 43} <= idx.within_radius(0.3, 0.3, "a", 0.1)
     assert idx.within_radius(0.3, 0.3, "zzz", 1) == set()
@@ -86,6 +93,17 @@ def test_spatial_index_matches_bruteforce_and_inclusive_boundary():
 def test_nearest_node_tie_lowest_id():
     locs = {5: L(5, 0, 1), 2: L(2, 0, -1)}
     assert nearest_node(locs, 0, 0) == 2
+
+
+def test_node_locator_matches_reference_and_ties():
+    locs = {5: L(5, 0, 1), 2: L(2, 0, -1), 9: L(9, 3, 3)}
+    nl = NodeLocator(locs)
+    assert nl.nearest(0, 0) == 2
+    assert nl.nearest(3, 3.1) == 9
+    grid = {i: L(i, (i % 10) / 10, (i // 10) / 10) for i in range(100)}
+    nl = NodeLocator(grid)
+    for q in [(0.05, 0.05), (0.33, 0.71), (0.5, 0.5), (2, 2), (-1, 0.2)]:
+        assert nl.nearest(*q) == nearest_node(grid, *q)
 
 
 def test_location_loader_errors(tmp_path):
