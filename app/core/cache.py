@@ -1,8 +1,11 @@
 import json
+import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Hashable
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 class LRUCache:
@@ -37,11 +40,12 @@ class LRUCache:
 
 
 class RedisCache:
-    """Shared result cache across workers/replicas. Fails open: any Redis error = cache miss."""
+    """Shared result cache across workers/replicas. Fails open: Redis/serialization errors = cache miss."""
 
     def __init__(self, url: str, ttl: int = 3600):
         import redis
 
+        self._err = (redis.RedisError, ValueError)
         self.r = redis.Redis.from_url(
             url, socket_timeout=0.05, socket_connect_timeout=0.05
         )
@@ -51,14 +55,15 @@ class RedisCache:
         try:
             v = self.r.get("ip:" + repr(key))
             return tuple(json.loads(v)) if v is not None else None
-        except Exception:
+        except self._err as e:
+            log.warning("redis get failed: %s", e)
             return None
 
     def put(self, key: Hashable, value: Any):
         try:
             self.r.setex("ip:" + repr(key), self.ttl, json.dumps(list(value)))
-        except Exception:
-            pass
+        except self._err as e:
+            log.warning("redis put failed: %s", e)
 
     def __len__(self):
         return 0
