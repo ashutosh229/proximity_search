@@ -33,6 +33,26 @@ def test_linkage_policies(tmp_path):
     assert g.adj[3] == []
 
 
+def test_coordinate_linkage_format_is_lon_lat(tmp_path):
+    locs = {
+        1: L(1, 0.0, 0.0),
+        2: L(2, 0.0, 0.010101),
+        3: L(3, 0.010101, 0.0),
+    }
+    f = tmp_path / "l.txt"
+    f.write_text(
+        "0.000000 0.000000 0.010101 0.000000\n"
+        "0.000000 0.000000 0.000000 0.010101\n"
+        "0.500000 0.500000 0.000000 0.000000\n"
+        "0.000000 nan 0.010101 0.000000\n"
+    )
+    g = load_graph(f, locs, "grid", directed=False)
+    assert sorted(v for v, _ in g.adj[1]) == [2, 3]
+    assert g.stats["unknown_node"] == 1
+    assert g.stats["malformed"] == 1
+    assert g.stats["edges"] == 4
+
+
 def test_directed_links(tmp_path):
     locs = {0: L(0, 0, 0), 1: L(1, 0, 1)}
     f = tmp_path / "l.txt"
