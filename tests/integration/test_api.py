@@ -1,5 +1,9 @@
 ROWS = [(i, 0.0, i / 100, "bank") for i in range(12)] + [(100, 0.0, 0.0, "hospital")]
 CHAIN = "\n".join(f"{i} {i+1}" for i in range(11)) + "\n"
+COORD_CHAIN = (
+    "\n".join(f"{i/100:.6f} 0.000000 {(i+1)/100:.6f} 0.000000" for i in range(11))
+    + "\n"
+)
 
 
 def post(c, **kw):
@@ -13,6 +17,18 @@ def test_valid_search_returns_ten_in_graph_order(make_client):
         r = post(c)
         assert r.status_code == 200
         assert r.json() == {"locations": list(range(10))}
+
+
+def test_coordinate_format_end_to_end(make_client):
+    with make_client(ROWS, {"link.txt": COORD_CHAIN}) as c:
+        r = post(c, link="link.txt")
+        assert r.status_code == 200
+        assert r.json() == {"locations": list(range(10))}
+
+
+def test_coordinate_and_id_formats_give_same_result(make_client):
+    with make_client(ROWS, {"chain.txt": CHAIN, "link.txt": COORD_CHAIN}) as c:
+        assert post(c, link="chain.txt").json() == post(c, link="link.txt").json()
 
 
 def test_category_and_radius_enforced(make_client):
