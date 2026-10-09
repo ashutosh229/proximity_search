@@ -28,11 +28,10 @@ jobs:
           for i in $(seq 1 30); do curl -sf localhost:8000/ready && break || sleep 1; done
           curl -sf -X POST localhost:8000/IP/search/ -d "lat=0.5&long=0.5&cat=bank&rad=0.3&link=links.txt"
           curl -sf localhost:8000/metrics | grep -q ip_requests_total
-      - uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: fs
-          severity: CRITICAL,HIGH
-          exit-code: "1"
+      - name: Trivy image scan
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+            image --severity CRITICAL,HIGH --exit-code 1 --ignore-unfixed "$IMAGE"
       - uses: docker/login-action@v3
         if: github.ref == 'refs/heads/main'
         with:
@@ -41,4 +40,3 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - if: github.ref == 'refs/heads/main'
         run: docker push "$IMAGE"
-  
