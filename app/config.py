@@ -25,7 +25,7 @@ class Settings:
         default_factory=lambda: _csv("PRELOAD_LINKS")
     )
     edge_weight_mode: str = field(
-        default_factory=lambda: os.getenv("EDGE_WEIGHT_MODE", "geographic")
+        default_factory=lambda: os.getenv("EDGE_WEIGHT_MODE", "grid")
     )
     directed_links: bool = field(default_factory=lambda: _bool("DIRECTED_LINKS", False))
     k: int = field(default_factory=lambda: int(os.getenv("TOP_K", "10")))
