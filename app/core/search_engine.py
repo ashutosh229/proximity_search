@@ -1,6 +1,11 @@
 from __future__ import annotations
 import threading
-from app.loaders.linkage_loader import file_identity, load_graph
+from app.loaders.linkage_loader import (
+    file_identity,
+    load_graph,
+    load_graph_text,
+    text_identity,
+)
 from app.loaders.location_loader import load_locations, normalise_category
 import logging
 from app.utils.metrics import Metrics
@@ -82,10 +87,43 @@ class SearchEngine:
                 )
         return g
 
+    def get_graph_from_text(self, text: str) -> Graph:
+        ident = text_identity(text, self.s.edge_weight_mode, self.s.directed_links)
+        g = self._graphs.get(ident)
+        if g is not None:
+            self.metrics.inc("ip_graph_cache_hits_total")
+            return g
+        with self._graph_lock:
+            g = self._graphs.get(ident)
+            if g is None:
+                t0 = time.perf_counter()
+                g = load_graph_text(
+                    text,
+                    self.locations,
+                    self.s.edge_weight_mode,
+                    self.s.directed_links,
+                )
+                self._graphs.put(ident, g)
+                self.metrics.inc("ip_graph_builds_total")
+                self.metrics.set(
+                    "ip_last_graph_build_seconds", time.perf_counter() - t0
+                )
+        return g
+
     def search(
-        self, lat: float, lon: float, cat: str, rad: float, link: str
+        self,
+        lat: float,
+        lon: float,
+        cat: str,
+        rad: float,
+        link: str | None = None,
+        link_text: str | None = None,
     ) -> list[int]:
-        graph = self.get_graph(link)
+        graph = (
+            self.get_graph_from_text(link_text)
+            if link_text is not None
+            else self.get_graph(link or "")
+        )
         cat = normalise_category(cat)
         key = (lat, lon, cat, rad, graph.identity, self.s.algorithm_version, self.s.k)
         cached = self.results.get(key)
