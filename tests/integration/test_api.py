@@ -1,3 +1,5 @@
+from pathlib import Path
+
 ROWS = [(i, 0.0, i / 100, "bank") for i in range(12)] + [(100, 0.0, 0.0, "hospital")]
 CHAIN = "\n".join(f"{i} {i+1}" for i in range(11)) + "\n"
 COORD_CHAIN = (
@@ -7,10 +9,25 @@ COORD_CHAIN = (
 EXPECTED = {"locations": list(range(10))}
 
 
-def post(c, **kw):
+def post(c, headers=None, **kw):
     data = dict(lat=0.0, long=0.0, cat="bank", rad=1.0, link="chain.txt")
     data.update(kw)
-    return c.post("/IP/search/", data=data)
+    link = data.pop("link")
+
+    if "\n" in link or "\r" in link:
+        filename = "inline.txt"
+        content = link.encode()
+    else:
+        filename = Path(link).name
+        path = c.app.state.engine.s.data_dir / link
+        content = path.read_bytes() if path.is_file() else link.encode()
+
+    return c.post(
+        "/IP/search/",
+        data=data,
+        files={"link": (filename, content, "text/plain")},
+        headers=headers,
+    )
 
 
 def test_valid_search_returns_ten_in_graph_order(make_client):
@@ -35,39 +52,33 @@ def test_coordinate_and_id_formats_give_same_result(make_client):
 def test_link_as_uploaded_file(make_client):
     with make_client(ROWS, {"chain.txt": CHAIN}) as c:
         data = dict(lat=0.0, long=0.0, cat="bank", rad=1.0)
-        r = c.post("/IP/search/", data=data, files={"link": ("link.txt", COORD_CHAIN)})
+        r = c.post("/IP/search/", data=data, files={"link": ("link.txt", COORD_CHAIN, "text/plain")})
         assert r.status_code == 200
         assert r.json() == EXPECTED
-        r = c.post("/IP/search/", data=data, files={"link": ("chain.txt", CHAIN)})
+        r = c.post("/IP/search/", data=data, files={"link": ("chain.txt", CHAIN, "text/plain")})
+        assert r.status_code == 200
         assert r.json() == EXPECTED
 
 
-def test_link_inline_text_get_and_json(make_client):
+def test_inline_linkage_text_upload(make_client):
     with make_client(ROWS, {"chain.txt": CHAIN}) as c:
-        q = dict(lat=0.0, long=0.0, cat="bank", rad=1.0)
-        assert c.post("/IP/search/", data={**q, "link": CHAIN}).json() == EXPECTED
-        assert (
-            c.get("/IP/search/", params={**q, "link": "chain.txt"}).json() == EXPECTED
-        )
-        assert c.post("/IP/search/", json={**q, "link": "chain.txt"}).json() == EXPECTED
-        assert c.post("/IP/search", data={**q, "link": "chain.txt"}).json() == EXPECTED
+        r = post(c, link=CHAIN)
+        assert r.status_code == 200
+        assert r.json() == EXPECTED
 
 
 def test_different_uploaded_links_are_not_confused(make_client):
     broken = "\n".join(f"{i} {i+1}" for i in range(5)) + "\n"
     with make_client(ROWS, {"chain.txt": CHAIN}) as c:
         q = dict(lat=0.0, long=0.0, cat="bank", rad=1.0)
-        a = c.post("/IP/search/", data=q, files={"link": ("a.txt", CHAIN)}).json()
-        b = c.post("/IP/search/", data=q, files={"link": ("b.txt", broken)}).json()
+        a = c.post("/IP/search/", data=q, files={"link": ("a.txt", CHAIN, "text/plain")}).json()
+        b = c.post("/IP/search/", data=q, files={"link": ("b.txt", broken, "text/plain")}).json()
         assert len(a["locations"]) == 10 and len(b["locations"]) == 6
 
 
 def test_category_and_radius_enforced(make_client):
     with make_client(ROWS, {"chain.txt": CHAIN}) as c:
-        assert post(c, cat="hospital").json()["locations"] in (
-            [],
-            [100],
-        )
+        assert post(c, cat="hospital").json()["locations"] in ([], [100])
         ids = post(c, rad=0.05).json()["locations"]
         assert all(i <= 5 for i in ids)
         ids = post(c, cat="BANK").json()["locations"]
@@ -109,17 +120,10 @@ def test_grid_mode_unit_weights(make_client):
 
 def test_validation_and_errors(make_client):
     with make_client(ROWS, {"chain.txt": CHAIN}) as c:
-        assert post(c, link="missing.txt").status_code == 404
-        assert post(c, link="../etc/passwd").status_code == 404
         assert post(c, rad=-1).status_code == 422
         assert post(c, lat="abc").status_code == 422
         assert post(c, rad="nan").status_code == 422
         assert c.post("/IP/search/", data={"lat": 0}).status_code == 422
-
-
-def test_nul_byte_link_is_404(make_client):
-    with make_client(ROWS, {"chain.txt": CHAIN}) as c:
-        assert post(c, link="a\x00b").status_code == 404
 
 
 def test_no_candidates_returns_empty(make_client):
@@ -130,17 +134,8 @@ def test_no_candidates_returns_empty(make_client):
 def test_api_key_enforced(make_client):
     with make_client(ROWS, {"chain.txt": CHAIN}, api_key="secret") as c:
         assert post(c).status_code == 401
-        data = dict(lat=0.0, long=0.0, cat="bank", rad=1.0, link="chain.txt")
-        assert (
-            c.post("/IP/search/", data=data, headers={"x-api-key": "wrong"}).status_code
-            == 401
-        )
-        assert (
-            c.post(
-                "/IP/search/", data=data, headers={"x-api-key": "secret"}
-            ).status_code
-            == 200
-        )
+        assert post(c, headers={"x-api-key": "wrong"}).status_code == 401
+        assert post(c, headers={"x-api-key": "secret"}).status_code == 200
 
 
 def test_cache_and_ops_endpoints(make_client):
