@@ -3,3 +3,4 @@ line-length = 120
 
 [tool.ruff.lint]
 ignore = ["C408", "E701", "E702", "E731", "I001"]
+extend-immutable-calls = ["fastapi.File", "fastapi.Form", "fastapi.Header"]
