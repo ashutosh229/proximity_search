@@ -4,65 +4,101 @@
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-A low-latency HTTP service that returns the **top-K nearest locations of a given category by road distance**. Candidates are first filtered by a Euclidean radius (KD-tree), then ranked by shortest-path distance over a road-linkage graph (Dijkstra with early termination).
+A stateless, horizontally scalable HTTP service that answers one question:
+
+> *Given a point, a category, and a radius, which K locations of that category are **closest by network distance** over a caller-supplied link graph?*
+
+Candidates are pre-filtered spatially (per-category KD-tree), then ranked by an early-terminating Dijkstra over the uploaded linkage graph. Results are cached (in-process LRU or shared Redis), instrumented with Prometheus, and shipped as a hardened container with Docker Compose and Kubernetes manifests.
 
 ---
 
 ## Table of Contents
 
-- [Features](#features)
-- [How It Works](#how-it-works)
-- [Quick Start](#quick-start)
-- [API Reference](#api-reference)
-- [Data Formats](#data-formats)
-- [Configuration](#configuration)
-- [Deployment](#deployment)
-- [Observability](#observability)
-- [Security](#security)
-- [Performance](#performance)
-- [Testing and Quality](#testing-and-quality)
-- [Project Structure](#project-structure)
-- [Design Decisions and Limitations](#design-decisions-and-limitations)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
+1. [Features](#features)
+2. [Architecture](#architecture)
+3. [Query Semantics](#query-semantics)
+4. [Quick Start](#quick-start)
+5. [API Reference](#api-reference)
+6. [Data Formats](#data-formats)
+7. [Configuration](#configuration)
+8. [Deployment](#deployment)
+9. [Observability](#observability)
+10. [Performance and Capacity Planning](#performance-and-capacity-planning)
+11. [Security](#security)
+12. [Operations Runbook](#operations-runbook)
+13. [Known Limitations](#known-limitations)
+14. [Development](#development)
+15. [CI/CD](#cicd)
+16. [Project Layout](#project-layout)
+17. [License](#license)
 
 ---
 
 ## Features
 
-- **Road-distance ranking**: results are ordered by shortest path over the linkage graph, not straight-line distance.
-- **Fast candidate retrieval**: per-category KD-tree (SciPy `cKDTree`) with exact inclusive radius filtering and a brute-force fallback.
-- **Single-source Dijkstra with early exit**: one traversal serves all candidates and stops after K targets are found.
-- **Deterministic output**: ties are broken by ascending location ID, both for the query-to-node mapping and for result ordering.
-- **Hot-reloading graphs**: linkage files are cached by `(path, mtime, size, weight mode, directedness)`; editing a file invalidates its cache entry automatically.
-- **Two-level caching**: in-process LRU, with an optional shared Redis result cache that fails open.
-- **Configurable semantics**: geographic or unit (grid) edge weights; undirected or directed links.
-- **Production ergonomics**: multi-worker serving, health/readiness probes, Prometheus metrics (multiprocess-safe), structured access logs with request IDs, optional API-key auth, nginx rate limiting, non-root multi-stage Docker image, Kubernetes manifests, CI with dependency audit and image scan.
+- **Network-distance ranking**: Dijkstra over the caller's linkage graph with early exit after K targets are finalized.
+- **Fast spatial prefilter**: one `scipy.spatial.cKDTree` per category, with a brute-force path kept for verification and benchmarking.
+- **Two linkage formats**: node-ID pairs (`id id`) or coordinate pairs (`lon lat lon lat`) with tolerance-based snapping.
+- **Two edge-weight modes**: unit-weight `grid` (default) or Euclidean `geographic`; directed or undirected graphs.
+- **Two-level caching**: parsed-graph LRU plus query-result cache (in-process LRU, or Redis shared across replicas; Redis fails open).
+- **Prometheus metrics** with multiprocess support, JSON structured access logs, and `x-request-id` propagation.
+- **Liveness/readiness endpoints**, graceful shutdown, non-root container, multi-stage image, Trivy and `pip-audit` gates in CI.
+- **Nginx edge** with per-IP rate limiting, keep-alive upstream, and `/metrics` ACL.
+- **Kubernetes manifests** with startup/readiness/liveness probes and a CPU-based HPA.
 
 ---
 
-## How It Works
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[POST /IP/search/] --> B[Validate input]
-    B --> C{Result cache hit?}
-    C -- yes --> R[Return IDs]
-    C -- no --> D[Radius filter<br/>KD-tree, category-scoped]
-    D --> E{Candidates?}
-    E -- none --> R
-    E -- some --> F[Map query to nearest node<br/>KD-tree, ties to lowest ID]
-    F --> G[Dijkstra from node<br/>stop after K targets]
-    G --> H[Cache and return top-K IDs]
+    C[Client] -->|POST /IP/search/| N[Nginx<br/>rate limit, body cap]
+    N --> A1[API worker<br/>uvicorn + FastAPI]
+    N --> A2[API worker ...]
+    A1 --> R[(Redis<br/>optional result cache)]
+    A2 --> R
+    P[Prometheus] -->|scrape /metrics| A1
+    subgraph Worker process
+      direction TB
+      H[Request handler<br/>auth, validation] --> E[SearchEngine]
+      E --> GC[Graph LRU cache]
+      E --> RC[Result cache<br/>LRU or Redis]
+      E --> SI[SpatialIndex<br/>KD-tree per category]
+      E --> NL[NodeLocator<br/>nearest node]
+      E --> SP[Dijkstra<br/>k-nearest]
+    end
 ```
 
-1. **Validate**: finite numbers, `rad >= 0`, linkage file resolved strictly inside the data directory.
-2. **Cache lookup**: key is `(lat, long, category, radius, graph identity, algorithm version, K)`.
-3. **Radius filter**: locations of the requested category within Euclidean distance `rad` (inclusive) of the query point.
-4. **Query node**: the query coordinate is snapped to the nearest location of any category.
-5. **Shortest paths**: Dijkstra from that node; candidates are accepted as they are finalized, up to K.
-6. **Response**: IDs in ascending road distance. Unreachable candidates are never returned, so fewer than K IDs may come back.
+### Request lifecycle
+
+1. Nginx rate-limits and forwards `POST /IP/search/`.
+2. The handler checks the API key (constant-time compare), readiness, and input validity.
+3. The uploaded linkage file is decoded and hashed (SHA-1) to form a graph identity. A cache hit skips parsing; a miss builds the adjacency map under a lock (double-checked) and stores it.
+4. A result-cache key is derived from `(lat, lon, category, radius, graph identity, algorithm version, K)`. A hit returns immediately.
+5. On a miss: KD-tree radius filter, then nearest-node snap of the query point as the Dijkstra source, then K-nearest by graph distance.
+6. CPU-bound work runs in Starlette's threadpool so the event loop stays responsive.
+
+### Process model
+
+Each uvicorn worker is an independent process holding its **own** copy of the location dataset, spatial indexes, and in-process caches. Workers share nothing except Redis (if configured) and the Prometheus multiprocess directory. Scale by adding workers or replicas; memory cost scales linearly with both.
+
+---
+
+## Query Semantics
+
+Be precise about what the service computes. Several behaviors are deliberate and affect correctness of downstream use.
+
+| Aspect | Behavior |
+|---|---|
+| **Radius filter** | Euclidean distance in raw coordinate space, `hypot(Δlat, Δlon)`, **inclusive** (`<= rad`, with a `1e-9` epsilon). Units are whatever your coordinates are in (degrees for lat/lon). It is **not** haversine or meters. |
+| **Category match** | Case-insensitive, whitespace-trimmed (`casefold`). `" Bank "` matches `bank`. |
+| **Source node** | The location nearest (Euclidean) to the query point, regardless of its category. Ties resolve to the lowest ID. |
+| **Ranking** | Ascending shortest-path distance over the uploaded graph. Ties resolve by lowest ID. |
+| **Reachability** | Candidates unreachable from the source are omitted, so fewer than K results (or none) is normal. |
+| **Path scope** | The radius constrains *candidates*, not the *path*. Shortest paths may traverse nodes outside the radius. |
+| **Result size** | At most `TOP_K` (default 10). |
+| **Edge weights** | `grid`: every edge costs `1.0` (hop count). `geographic`: Euclidean length of the edge. |
+| **Duplicate edges** | Minimum weight wins. Self-loops and unknown nodes are dropped and counted in graph stats. |
 
 ---
 
@@ -70,357 +106,426 @@ flowchart LR
 
 ### Prerequisites
 
-- Python 3.12+ (or Docker)
-- `make` (optional)
+- Python 3.12 (local) or Docker 24+ with Compose v2
+- A locations dataset (`data/locations.csv`). A synthetic generator is included.
 
-### Local
+### Run with Docker Compose
 
 ```bash
-git clone https://github.com/ashutosh229/proximity_search.git
-cd proximity_search
+make data        # generate sample data: data/locations.csv + data/link.txt
+make docker      # docker compose up --build  (Nginx on :80)
+```
 
+```bash
+curl -s -X POST http://localhost/IP/search/ \
+  -F lat=0.5 -F long=0.5 -F cat=bank -F rad=0.3 \
+  -F "link=@data/link.txt;type=text/plain"
+# {"locations":[4951,4850, ...]}
+```
+
+> The image **bakes in** `./data` at build time (`COPY data ./data`) and Compose additionally bind-mounts `./data` read-only. Generate or provide data **before** `docker build`.
+
+### Run locally
+
+```bash
 python -m venv .venv && source .venv/bin/activate
-make install          # pip install -r requirements-dev.txt
-make data             # generates data/locations.csv and data/links.txt (synthetic)
-make run              # http://localhost:8000
-```
-
-> The generated dataset is a synthetic 100x100 grid for local testing only. Supply your own `locations.csv` and linkage files for real use.
-
-### Try it
-
-```bash
-curl -X POST http://localhost:8000/IP/search/ \
-  -d "lat=0.5" -d "long=0.5" -d "cat=bank" -d "rad=0.3" -d "link=links.txt"
-# {"locations":[4950,4949,4951,...]}
-```
-
-### Docker Compose (app + nginx)
-
-```bash
+make install
 make data
-docker compose up --build
-curl -X POST http://localhost/IP/search/ \
-  -d "lat=0.5&long=0.5&cat=bank&rad=0.3&link=links.txt"
+make run         # uvicorn on :8080 with --reload
+curl -s localhost:8080/ready
 ```
+
+Interactive OpenAPI docs are served by FastAPI at `/docs` (see [Security](#security) before exposing publicly).
 
 ---
 
 ## API Reference
 
-Interactive docs are served at `/docs` (Swagger UI) and `/redoc`.
-
 ### `POST /IP/search/`
 
-Content type: `application/x-www-form-urlencoded` (form fields).
+Content type: `multipart/form-data`.
 
-| Field  | Type   | Required | Constraints                  | Description                                       |
-| ------ | ------ | -------- | ---------------------------- | ------------------------------------------------- |
-| `lat`  | float  | yes      | finite                       | Query latitude                                    |
-| `long` | float  | yes      | finite                       | Query longitude                                   |
-| `cat`  | string | yes      | 1-64 chars, case-insensitive | Location category                                 |
-| `rad`  | float  | yes      | finite, `>= 0`               | Euclidean radius, in coordinate units, inclusive  |
-| `link` | string | yes      | 1-128 chars                  | Linkage file name, relative to the data directory |
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `lat` | float | yes | finite |
+| `long` | float | yes | finite |
+| `cat` | string | yes | 1-64 chars after trimming |
+| `rad` | float | yes | finite, `>= 0` |
+| `link` | file | yes | non-empty; UTF-8 text (BOM tolerated); see [Data Formats](#data-formats) |
 
-Header (only when `API_KEY` is set): `x-api-key: <key>`.
+Header: `X-API-Key: <key>` (required only when `API_KEY` is set).
 
-**Success `200`**
+**200 OK**
 
 ```json
-{ "locations": [12, 7, 31] }
+{ "locations": [4951, 4850, 5052] }
 ```
 
-**Errors**
+An empty list is a valid result (no candidates in range, or none reachable).
 
-| Status | Cause                                                        |
-| ------ | ------------------------------------------------------------ |
-| `401`  | Missing or invalid `x-api-key` (when auth is enabled)        |
-| `404`  | Linkage file not found or outside the data directory         |
-| `422`  | Missing, non-numeric, non-finite, or out-of-range parameters |
-| `503`  | Service still starting up (data not loaded)                  |
-
-Every response carries an `x-request-id` header (echoed from the request if provided).
+| Status | Cause |
+|---|---|
+| `401` | `API_KEY` configured and header missing/incorrect |
+| `422` | Missing field, non-numeric or non-finite `lat`/`long`/`rad`, negative `rad`, `cat` outside 1-64 chars, empty `link` file |
+| `503` | Engine not ready (startup incomplete) |
+| `404` | Linkage file not found (server-side path resolution; not reachable via the multipart upload path) |
 
 ### Operational endpoints
 
-| Endpoint       | Purpose                                               |
-| -------------- | ----------------------------------------------------- |
-| `GET /health`  | Liveness: process is up                               |
-| `GET /ready`   | Readiness: `200` once data is loaded, otherwise `503` |
-| `GET /metrics` | Prometheus exposition (restrict to internal networks) |
+| Endpoint | Purpose | Notes |
+|---|---|---|
+| `GET /health` | Liveness | Always `{"status":"ok"}` while the process is up |
+| `GET /ready` | Readiness | `503` until the dataset is loaded |
+| `GET /metrics` | Prometheus exposition | Restricted by Nginx ACL; see [Security](#security) |
+
+Every response carries an `x-request-id` header (echoed from the request or generated).
 
 ---
 
 ## Data Formats
 
-### `locations.csv`
+### Locations: `locations.csv`
 
-Header is required; column order is flexible, names are case-insensitive.
+Loaded once at startup. A malformed file **aborts startup** (fail fast).
 
 ```csv
 ID,Latitude,Longitude,Category
-0,0.000000,0.000000,bank
-1,0.000000,0.010101,hospital
+1,0.000000,0.000000,bank
+2,0.000000,0.010101,hospital
 ```
 
-- `ID` is a unique integer; duplicates abort startup.
-- Coordinates must be finite floats.
-- Categories are trimmed and case-folded.
-- Malformed rows abort startup with a line-numbered error.
+- Header is required, case-insensitive; columns may appear in any order.
+- `ID` is an integer and must be unique; `Latitude`/`Longitude` must be finite.
+- Categories are normalized with `casefold`.
+- Blank rows are skipped. UTF-8 BOM is accepted.
 
-### Linkage files (e.g. `links.txt`)
+### Linkage: uploaded `link` file
 
-One link per line: two location IDs separated by whitespace or a comma.
+One edge per line. Blank lines and lines beginning with `#` are ignored. Separators may be spaces or commas.
 
-```text
-# comments and blank lines are ignored
-0 1
+**ID format** (2 fields):
+
+```
 1 2
+2 3
 ```
 
-Deterministic loading policy (counted in per-graph stats and logged as a warning when relevant):
+**Coordinate format** (4 fields, **longitude first**):
 
-| Condition            | Behavior                                     |
-| -------------------- | -------------------------------------------- |
-| Malformed line       | Skipped                                      |
-| Unknown node ID      | Skipped                                      |
-| Self-loop            | Skipped                                      |
-| Duplicate link       | Collapsed, smallest weight kept              |
-| Undirected (default) | Both directions stored                       |
-| Directed             | `a -> b` only                                |
-| Isolated location    | Valid as a query source, reaches only itself |
-
-Validate datasets before deploying:
-
-```bash
-python scripts/validate_dataset.py data/locations.csv data/links.txt
 ```
+lon_a lat_a lon_b lat_b
+0.000000 0.000000 0.010101 0.000000
+```
+
+Coordinate endpoints are resolved to location IDs by exact match at 1e-6 precision, falling back to nearest-neighbour snapping within a tolerance of `1e-4`. Endpoints that cannot be resolved are counted as `unknown_node` and skipped.
+
+Graphs are **undirected** by default (each line produces both directions) unless `DIRECTED_LINKS=true`. Malformed lines, unknown nodes, self-loops, and duplicate edges are tallied; a warning with these stats is logged whenever malformed or unknown-node lines are present.
 
 ---
 
 ## Configuration
 
-All settings are environment variables.
+All configuration is via environment variables (12-factor). Invalid `EDGE_WEIGHT_MODE` fails startup.
 
-| Variable           | Default         | Description                                                         |
-| ------------------ | --------------- | ------------------------------------------------------------------- |
-| `DATA_DIR`         | `data`          | Directory containing the locations file and linkage files           |
-| `LOCATIONS_FILE`   | `locations.csv` | Locations CSV name inside `DATA_DIR`                                |
-| `PRELOAD_LINKS`    | _(empty)_       | Comma-separated linkage files built at startup                      |
-| `DEFAULT_LINK`     | _(empty)_       | Additional linkage file warmed at startup                           |
-| `EDGE_WEIGHT_MODE` | `geographic`    | `geographic` (Euclidean edge length) or `grid` (every edge costs 1) |
-| `DIRECTED_LINKS`   | `false`         | Treat links as one-way                                              |
-| `TOP_K`            | `10`            | Maximum results per query                                           |
-| `CACHE_SIZE`       | `1024`          | In-process result cache entries (`0` disables)                      |
-| `GRAPH_CACHE_SIZE` | `4`             | Number of linkage graphs kept in memory                             |
-| `USE_KDTREE`       | `true`          | Use KD-tree for radius filtering (`false` forces brute force)       |
-| `REDIS_URL`        | _(empty)_       | Enables shared Redis result cache, e.g. `redis://redis:6379/0`      |
-| `REDIS_TTL`        | `3600`          | Redis entry TTL in seconds                                          |
-| `API_KEY`          | _(empty)_       | Enables `x-api-key` authentication on `/IP/search/`                 |
-| `WEB_CONCURRENCY`  | `4` (image)     | Number of uvicorn worker processes                                  |
-| `LOG_LEVEL`        | `INFO`          | Python log level                                                    |
+| Variable | Default | Description |
+|---|---|---|
+| `DATA_DIR` | `data` (`/srv/data` in image) | Directory containing the locations file and server-side linkage files |
+| `LOCATIONS_FILE` | `locations.csv` | Locations CSV filename inside `DATA_DIR` |
+| `EDGE_WEIGHT_MODE` | `grid` | `grid` (unit weights) or `geographic` (Euclidean) |
+| `DIRECTED_LINKS` | `false` | Treat each linkage line as one directed edge |
+| `TOP_K` | `10` | Max results per query |
+| `USE_KDTREE` | `true` | Use per-category KD-trees; `false` forces brute-force filtering |
+| `CACHE_SIZE` | `1024` | In-process result-cache capacity (entries, per worker). `0` disables |
+| `GRAPH_CACHE_SIZE` | `4` | Parsed graphs retained per worker (LRU) |
+| `REDIS_URL` | *(unset)* | Enables shared Redis result cache, e.g. `redis://redis:6379/0` |
+| `REDIS_TTL` | `3600` | Redis entry TTL in seconds |
+| `API_KEY` | *(unset)* | When set, requires matching `X-API-Key`. Unset disables auth |
+| `PRELOAD_LINKS` | `link.txt` in Compose/K8s | Comma-separated linkage files in `DATA_DIR` parsed at startup (see [limitations](#known-limitations)) |
+| `DEFAULT_LINK` | *(unset)* | Additional linkage file parsed at startup |
+| `WEB_CONCURRENCY` | `4` (Compose), `2` (K8s) | Uvicorn worker processes |
+| `LOG_LEVEL` | `INFO` | Python log level |
+| `PROMETHEUS_MULTIPROC_DIR` | `/tmp/prom` (image) | Metrics aggregation directory across workers; cleared on container start |
 
-> Each worker holds its own graph and in-process cache. Size memory as `workers x graph size`, or enable Redis to share results.
+> **Changing `EDGE_WEIGHT_MODE` or `DIRECTED_LINKS` changes results.** Both are part of the graph identity, so cached graphs are not mixed, but they alter ranking semantics for every client. Treat them as deploy-time contract settings.
 
 ---
 
 ## Deployment
 
-### Docker
+### Docker image
 
-The image is multi-stage, runs as a non-root user, contains only runtime dependencies, and has a built-in healthcheck against `/ready`.
+- Multi-stage build on `python:3.12-slim`; dependencies installed to an isolated prefix and copied into the runtime stage.
+- Runs as non-root user `app` (UID `10001`).
+- `HEALTHCHECK` polls `/ready` every 15s (20s start period).
+- Entrypoint: `uvicorn app.main:app --proxy-headers --timeout-graceful-shutdown 20`. Worker count comes from `WEB_CONCURRENCY`.
+
+### Docker Compose (single host)
 
 ```bash
-docker build -t proximity-search .
-docker run -d -p 8000:8000 \
-  -v "$PWD/data:/srv/data:ro" \
-  -e PRELOAD_LINKS=links.txt \
-  -e WEB_CONCURRENCY=4 \
-  proximity-search
+export API_KEY="$(openssl rand -hex 32)"
+export WEB_CONCURRENCY=4
+make data && docker compose up --build -d
 ```
 
-### Docker Compose
-
-`docker-compose.yml` runs the API behind nginx (`nginx.conf`) which provides:
-
-- request rate limiting (50 r/s per IP, burst 100)
-- 4 KB body limit and 5 s upstream read timeout
-- `/metrics` restricted to private networks
+- Nginx is the only published port (`80`); the API is `expose`d on the internal network only.
+- The API is capped at 4 CPUs / 2 GiB. Nginx waits for the API healthcheck (`service_healthy`).
+- Terminate TLS in front of Nginx (cloud LB, Caddy, Traefik) or extend `nginx.conf` with a `443` server block.
 
 ### Kubernetes
 
-`k8s.yaml` provides a Deployment (startup, readiness and liveness probes, resource requests and limits), a Service, and an HPA targeting 65% CPU.
+`k8s.yaml` provides a `Deployment`, `Service`, and `HorizontalPodAutoscaler`.
 
 ```bash
-kubectl apply -f k8s.yaml
+sed -e 's#REGISTRY/proximity-search:TAG#ghcr.io/<owner>/proximity_search:<sha>#' k8s.yaml | kubectl apply -f -
 ```
 
-Replace `REGISTRY/proximity-search:TAG`, mount your dataset (volume, PVC, or bake into the image), and provide `API_KEY` / `REDIS_URL` through Secrets or env as needed.
+| Setting | Value |
+|---|---|
+| Replicas / HPA | 2 min, 10 max, target 65% CPU |
+| Requests / limits | 1 CPU, 512 Mi / 2 CPU, 1 Gi |
+| `WEB_CONCURRENCY` | 2 |
+| Startup probe | `/ready`, up to 30 failures at 2s (about 60s to load) |
+| Readiness probe | `/ready` every 5s |
+| Liveness probe | `/health` every 10s, 3 failures |
+| Scrape annotations | `prometheus.io/scrape: "true"`, port `8000` |
 
-### Releasing
+Before production, add or verify:
 
-CI builds the image on every push, smoke-tests it, scans with Trivy, and pushes `ghcr.io/<owner>/<repo>:<sha>` from `main`.
+- **Secrets**: uncomment the `API_KEY` `secretKeyRef` and create `ps-secret`.
+- **Redis**: uncomment `REDIS_URL`. Without it, each pod and each worker holds a separate cache, so hit rates fall as you scale out.
+- **Ingress/Gateway**, TLS, and a `NetworkPolicy` (not included).
+- **PodDisruptionBudget** and topology spread constraints (not included).
+- **Memory sizing**: every worker loads the full dataset. Set `limits.memory` from measured RSS (see below), not guesses.
+- Confirm `terminationGracePeriodSeconds` (default 30s) exceeds the 20s graceful-shutdown timeout.
+
+### Rollout and data updates
+
+The locations dataset is read **only at startup** and is baked into the image. To change it: rebuild or remount, then perform a rolling restart. Server-side linkage files are fingerprinted by `(path, mtime, size)`, but the HTTP API consumes uploaded linkage text, which is fingerprinted by content hash.
 
 ---
 
 ## Observability
 
-### Metrics
+### Metrics (`GET /metrics`)
 
-Exposed at `/metrics`. With multiple workers, metrics are aggregated across processes via `prometheus_client` multiprocess mode (`PROMETHEUS_MULTIPROC_DIR`, preconfigured in the image).
+| Metric | Type | Meaning |
+|---|---|---|
+| `ip_requests_total` | counter | Requests received (counted before auth) |
+| `ip_request_errors_total` | counter | Requests that raised an `HTTPException` (401/422/503/404). Unhandled 5xx are not counted here |
+| `ip_request_latency_seconds` | histogram | Handler latency; buckets 1ms-1s |
+| `ip_cache_hits_total` / `ip_cache_misses_total` | counter | Result-cache outcome |
+| `ip_graph_cache_hits_total` | counter | Parsed-graph cache hits |
+| `ip_graph_builds_total` | counter | Graph parses (cache misses) |
+| `ip_last_graph_build_seconds` | gauge | Duration of the most recent graph build |
+| `ip_candidates_total` | counter | Candidates produced by the radius filter |
+| `ip_nodes_finalized_total` | counter | Dijkstra nodes settled |
+| `ip_edge_relaxations_total` | counter | Dijkstra edge relaxations |
+| `ip_startup_seconds` / `ip_locations_loaded` | gauge | Startup duration / dataset size |
+| `ip_cache_entries` | gauge | In-process result-cache size (always `0` with Redis) |
 
-| Metric                                          | Type      | Meaning                                  |
-| ----------------------------------------------- | --------- | ---------------------------------------- |
-| `ip_requests_total`                             | counter   | Search requests                          |
-| `ip_request_errors_total`                       | counter   | Requests ending in an HTTP error         |
-| `ip_request_latency_seconds`                    | histogram | Search latency                           |
-| `ip_cache_hits_total` / `ip_cache_misses_total` | counter   | Result cache outcomes                    |
-| `ip_graph_cache_hits_total`                     | counter   | Graph cache hits                         |
-| `ip_graph_builds_total`                         | counter   | Graph (re)builds                         |
-| `ip_last_graph_build_seconds`                   | gauge     | Duration of the most recent graph build  |
-| `ip_candidates_total`                           | counter   | Candidates produced by the radius filter |
-| `ip_nodes_finalized_total`                      | counter   | Dijkstra nodes finalized                 |
-| `ip_edge_relaxations_total`                     | counter   | Dijkstra edge relaxations                |
-| `ip_startup_seconds`, `ip_locations_loaded`     | gauge     | Startup cost and dataset size            |
-| `ip_cache_entries`                              | gauge     | Entries in the result cache              |
+Metrics are aggregated across workers via `PROMETHEUS_MULTIPROC_DIR`.
 
-Suggested alerts: p95 latency, 5xx / error ratio, `/ready` failures, sustained drop in cache hit ratio, frequent `ip_graph_builds_total` increments.
+### Suggested alerts
+
+```yaml
+# Error ratio
+- alert: ProximitySearchHighErrorRate
+  expr: rate(ip_request_errors_total[5m]) / rate(ip_requests_total[5m]) > 0.05
+  for: 10m
+
+# p95 latency
+- alert: ProximitySearchSlowP95
+  expr: histogram_quantile(0.95, sum by (le) (rate(ip_request_latency_seconds_bucket[5m]))) > 0.25
+  for: 10m
+
+# Graph thrash: parsing uploads constantly means clients send many distinct linkage files
+- alert: ProximitySearchGraphChurn
+  expr: rate(ip_graph_builds_total[10m]) > 0.5
+  for: 15m
+
+# Search work per candidate rising: topology or radius shifts
+- alert: ProximitySearchDijkstraCostHigh
+  expr: rate(ip_nodes_finalized_total[10m]) / rate(ip_cache_misses_total[10m]) > 20000
+  for: 15m
+```
+
+Tune thresholds to your baseline from load tests.
 
 ### Logs
 
-Access logs are JSON, one line per request, logger name `access`:
+Access logs are one JSON object per request on the `access` logger:
 
 ```json
-{
-  "rid": "3f2c...",
-  "method": "POST",
-  "path": "/IP/search/",
-  "status": 200,
-  "ms": 3.41
-}
+{"rid": "9f2c...", "method": "POST", "path": "/IP/search/", "status": 200, "ms": 12.41}
 ```
 
-Linkage loading emits a warning with per-file counts when malformed or unknown-node lines are skipped.
+Application logs use `%(asctime)s %(levelname)s %(name)s %(message)s`. Ship stdout to your log pipeline and index on `rid` for tracing; Nginx forwards client-supplied `x-request-id` to the API.
+
+---
+
+## Performance and Capacity Planning
+
+**Algorithmic profile**
+
+- Radius filter: KD-tree range query plus an exact distance check on the candidate subset.
+- Ranking: Dijkstra with early termination once K targets are settled. Cost is driven by how far from the source the K-th reachable candidate lies, not by total graph size. Worst case (sparse or unreachable targets) explores the whole connected component.
+- Cache hit: a dictionary or Redis lookup.
+
+**Measure, do not assume.** The repo ships the tools:
+
+```bash
+make bench                                   # brute-force vs KD-tree filter, end-to-end p50/p90/p95/p99 and single-thread QPS
+python scripts/build_index.py link.txt       # startup index build, graph build, edge count, peak RSS
+make load                                    # Locust: 100 users, 20/s spawn, 60s against http://localhost
+python scripts/validate_dataset.py data/locations.csv data/link.txt   # dataset and linkage sanity stats
+```
+
+**Sizing guidance**
+
+1. Run `build_index.py` against production-scale data to get **peak RSS per worker**.
+2. Memory per pod is approximately `WEB_CONCURRENCY x per-worker RSS` plus headroom for `GRAPH_CACHE_SIZE` parsed graphs and result caches.
+3. CPU is the primary scaling axis (pure-Python Dijkstra). Prefer more replicas with `WEB_CONCURRENCY` close to the CPU limit.
+4. Upload size is bounded by Nginx `client_max_body_size 64m`. Graph parse time grows linearly with linkage lines; `ip_last_graph_build_seconds` shows the cost.
+5. Use Redis when running more than one replica **and** clients repeat queries. In-process caches are per worker.
+
+**Redis behavior**: socket and connect timeouts are 50 ms and all errors are swallowed (logged at WARNING), so the service degrades to computing every query instead of failing. During a Redis outage this adds up to roughly 100 ms of timeout latency per request (get plus put) until the dependency recovers or is removed.
 
 ---
 
 ## Security
 
-- **Path traversal protection**: `link` is resolved strictly inside `DATA_DIR`; traversal attempts and invalid paths return `404`.
-- **Authentication**: optional shared key via `API_KEY` (constant-time comparison). For multi-tenant or internet-facing use, terminate auth at your gateway.
-- **Input bounds**: length limits on string fields, finite-number checks, 4 KB request body limit at nginx.
-- **Least privilege**: container runs as non-root; data volume mounted read-only.
-- **Supply chain**: CI runs `pip-audit` and a Trivy scan. Pin dependencies (for example `pip freeze > requirements.lock`) for reproducible builds.
-- **Metrics exposure**: do not expose `/metrics` publicly.
+| Control | Status |
+|---|---|
+| Authentication | Optional shared secret via `X-API-Key`, compared with `hmac.compare_digest`. **Disabled when `API_KEY` is unset.** Always set it outside local development |
+| Input validation | Finite-number checks, `rad >= 0`, category length, non-empty upload |
+| Rate limiting | Nginx `limit_req` on `/IP/`: 50 r/s per client IP, burst 100 |
+| Body limit | 64 MB at Nginx |
+| Container | Non-root (UID 10001), slim base image, no build tooling in runtime stage |
+| Supply chain | `pip-audit` on requirements and Trivy (CRITICAL/HIGH, unfixed ignored) in CI |
+| Transport | **No TLS in this repo.** Terminate at your ingress or load balancer |
+
+Hardening notes before exposing to the internet:
+
+- **Metrics ACL**: Nginx allows `127.0.0.1`, `10.0.0.0/8`, `172.16.0.0/12`. On Docker bridge networks, published-port traffic can appear to come from the bridge gateway (`172.x`), which would match the allow list. Do not rely on it as the only control; scrape over the internal network and block `/metrics` at the edge.
+- **Client IP for rate limiting**: `limit_req` keys on `$binary_remote_addr`. Behind a load balancer every client shares its address; configure `real_ip_header` / `set_real_ip_from` in Nginx.
+- **API docs**: FastAPI's `/docs` and `/openapi.json` are enabled by default. Block them at the edge or disable them in production.
+- **Authentication ordering**: multipart bodies are parsed by the framework before the handler's key check runs, so unauthenticated large uploads still consume bandwidth and memory up to the body limit. Enforce auth or WAF rules at the edge for hostile environments, and lower `client_max_body_size` to your real maximum linkage size.
+- **Key rotation**: `API_KEY` is read at process start; rotate via a rolling restart.
 
 ---
 
-## Performance
+## Operations Runbook
 
-| Stage          | Technique                                                      |
-| -------------- | -------------------------------------------------------------- |
-| Radius filter  | Per-category `cKDTree`, exact inclusive post-filter            |
-| Query-to-node  | KD-tree with deterministic tie-break (no O(N) scan)            |
-| Ranking        | Single-source Dijkstra, early exit after K targets             |
-| Repeat queries | LRU result cache, optional Redis                               |
-| Cold start     | `PRELOAD_LINKS` builds graphs before the service reports ready |
-| CPU scaling    | Multiple worker processes (GIL bypass), HPA across replicas    |
+| Symptom | Likely cause | Action |
+|---|---|---|
+| Container exits at start with `DatasetError` | Missing or malformed `locations.csv` (bad header, duplicate ID, non-finite coordinate) | Run `python scripts/validate_dataset.py <csv>`; fix the data |
+| Startup fails with `LinkageNotFound` | A `PRELOAD_LINKS` / `DEFAULT_LINK` file is missing from `DATA_DIR` | Fix the filename or clear the variable |
+| Pod never becomes Ready | Dataset load slower than startup probe window (60s) | Raise `failureThreshold` or check `ip_startup_seconds` |
+| `401` for valid clients | Header name or value mismatch, or secret rotated | Send `X-API-Key`; verify `API_KEY` in the pod |
+| `422` on every request | Client sending `long_` instead of `long`, or not multipart | Use form fields exactly as documented |
+| Empty results unexpectedly | Radius too small (units are coordinate units, not km); category typo; source node isolated or disconnected from candidates | Test with a larger `rad`; check linkage stats in the warning log; confirm the category exists |
+| Results differ between environments | Different `EDGE_WEIGHT_MODE` or `DIRECTED_LINKS` | Align env vars; they alter ranking |
+| Latency spike after deploy | Cold caches and graph rebuilds | Watch `ip_graph_builds_total` and cache hit ratio; consider Redis |
+| `ip_graph_builds_total` climbing steadily | Clients upload many distinct linkage files; `GRAPH_CACHE_SIZE=4` too small | Raise `GRAPH_CACHE_SIZE` (watch memory) or have clients reuse files |
+| WARNING `redis get failed` | Redis down or exceeding the 50 ms timeout | Restore Redis; service continues uncached |
+| OOMKilled | Workers x per-worker RSS exceeds limit | Reduce `WEB_CONCURRENCY` or raise memory limit |
+| Rate-limited (`503` from Nginx) | Burst above 50 r/s per IP plus 100 burst | Adjust `limit_req_zone` or fix client retry storms |
 
-Benchmark and load test:
+Graceful shutdown: on `SIGTERM` uvicorn stops accepting connections and drains in-flight requests for up to 20 seconds.
+
+---
+
+## Known Limitations
+
+Documented here so operators are not surprised.
+
+- **Preloading does not warm the HTTP path.** `PRELOAD_LINKS` / `DEFAULT_LINK` parse server-side files under a *file-based* cache identity, but the API always receives linkage as an upload keyed by a *content-hash* identity. Preloaded graphs therefore validate the files and occupy `GRAPH_CACHE_SIZE` slots without being hit by API traffic. For an upload-only deployment, set `PRELOAD_LINKS=` (empty) to reclaim the slots and skip the startup parse.
+- **Planar Euclidean model.** Radius and nearest-node logic use raw coordinate distance, not great-circle distance. Appropriate for normalized or projected grids, approximate for real lat/lon at scale.
+- **In-memory dataset.** All locations and indexes are loaded per worker; there is no hot reload of `locations.csv`.
+- **Per-worker in-process caches.** Without Redis, hit rates fall as workers and replicas increase.
+- **Redis key hygiene.** Keys are `ip:` plus the `repr` of the query tuple (including the graph identity); there is no namespace versioning other than `algorithm_version`. Use a dedicated Redis DB and flush on algorithm or semantic changes.
+- **Pure-Python Dijkstra.** Adequate for the tested 100x100 grid profile (see `tests/benchmark`); very large or dense graphs will need profiling, a compiled shortest-path implementation, or precomputation.
+
+---
+
+## Development
 
 ```bash
-make bench     # radius-filter brute force vs KD-tree, plus end-to-end latency percentiles
-make load      # Locust, 100 users for 60 s against http://localhost
-python scripts/build_index.py links.txt   # index/graph build time and peak RSS
+make install     # pip install -r requirements-dev.txt
+make data        # generate synthetic dataset (100x100 grid, 8 categories)
+make lint        # ruff check app tests scripts
+make test        # pytest -q (unit, integration, benchmark smoke)
+make run         # dev server with reload on :8080
 ```
 
-Scale guidance: pure-Python Dijkstra is comfortable up to roughly 10^5 nodes. Beyond about 10^6 nodes, move the graph to CSR arrays (`scipy.sparse.csgraph.dijkstra` with `limit`) or a compiled implementation.
-
----
-
-## Testing and Quality
+Generate a different dataset:
 
 ```bash
-make test      # pytest (unit, integration, perf smoke)
-make lint      # ruff
+python scripts/generate_sample_data.py --out data --n 200 --keep 0.85 --seed 11
 ```
 
-| Suite               | Covers                                                                                                                                |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/unit`        | Distance and weights, linkage policies, Dijkstra correctness and tie-breaks, KD-tree vs brute force, node locator, dataset validation |
-| `tests/integration` | API contract, road-vs-Euclidean ranking, topology changes, weight modes, validation errors, auth, cache, metrics                      |
-| `tests/benchmark`   | Performance regression smoke test (100x100 grid)                                                                                      |
+| Make target | Description |
+|---|---|
+| `install` | Install runtime and dev dependencies |
+| `data` | Generate `data/locations.csv` and `data/link.txt` |
+| `test` | Run the full pytest suite |
+| `lint` | Ruff lint (`line-length = 120`) |
+| `run` | Hot-reload dev server |
+| `bench` | Radius-filter and end-to-end benchmark |
+| `docker` | Build and start the Compose stack |
+| `load` | Headless Locust load test |
 
-CI (`.github/workflows/ci.yml`) runs lint, dependency audit, all tests, image build with an end-to-end smoke test, a Trivy scan, and image publish on `main`.
+### Testing strategy
+
+- **Unit** (`tests/unit`): shortest-path correctness vs. oracle, tie-breaking, early termination, KD-tree vs. brute-force equivalence (including inclusive boundaries), linkage parsing policies, snapping tolerance, loader errors.
+- **Integration** (`tests/integration`): full HTTP flow, both linkage formats, upload isolation (different graphs never confused), auth, validation, edge-weight modes, cache and metrics endpoints.
+- **Benchmark smoke** (`tests/benchmark`): Dijkstra on a 100x100 grid must complete under 0.5s.
 
 ---
 
-## Project Structure
+## CI/CD
 
-```text
+GitHub Actions (`.github/workflows/ci.yml`) on every push and PR:
+
+1. **test**: `ruff`, `pip-audit`, unit tests, then integration and benchmark tests.
+2. **docker** (after `test`): generate data, build the image tagged `ghcr.io/<repo>:<sha>`, run it, wait for `/ready`, send a real multipart search, check `/metrics`, then run a **Trivy** scan (fails on CRITICAL/HIGH with available fixes).
+3. On `main` only: log in to GHCR and push the SHA-tagged image.
+
+Images are tagged by commit SHA. Deploy by SHA and promote the same artifact across environments.
+
+---
+
+## Project Layout
+
+```
 .
 ├── app/
-│   ├── main.py                  # app factory, lifespan, access logging, ops endpoints
-│   ├── config.py                # environment-driven settings
-│   ├── api/search.py            # POST /IP/search/
+│   ├── main.py                 # app factory, lifespan, access logging, ops endpoints
+│   ├── config.py               # env-driven immutable Settings
+│   ├── api/search.py           # POST /IP/search/
 │   ├── core/
-│   │   ├── search_engine.py     # orchestration, graph/result caching
-│   │   ├── spatial_index.py     # category KD-trees, NodeLocator
-│   │   ├── shortest_path.py     # Dijkstra with early termination
-│   │   ├── graph.py             # adjacency-list graph
-│   │   └── cache.py             # LRUCache, RedisCache
-│   ├── loaders/                 # locations.csv and linkage parsers
-│   ├── models/                  # Location, response schema
-│   └── utils/                   # distance, Prometheus metrics
-├── scripts/                     # data generation, validation, benchmark, locust, index build
-├── tests/                       # unit, integration, benchmark
-├── data/                        # locations.csv and linkage files (not committed)
+│   │   ├── search_engine.py    # orchestration, graph + result caches
+│   │   ├── spatial_index.py    # KD-tree per category, nearest-node locator
+│   │   ├── shortest_path.py    # early-exit Dijkstra
+│   │   ├── graph.py            # adjacency-list graph
+│   │   └── cache.py            # LRUCache, RedisCache (fail-open)
+│   ├── loaders/                # locations CSV + linkage parsing/snapping
+│   ├── models/                 # Location, response schema
+│   └── utils/                  # distance/weights, Prometheus metrics
+├── scripts/                    # benchmark, build_index, generate_sample_data, validate_dataset, locustfile
+├── tests/                      # unit / integration / benchmark
 ├── Dockerfile
 ├── docker-compose.yml
 ├── nginx.conf
 ├── k8s.yaml
 ├── Makefile
-└── requirements*.txt
+└── .github/workflows/ci.yml
 ```
-
----
-
-## Design Decisions and Limitations
-
-- **Distance units**: radius and geographic edge weights use planar Euclidean distance on raw latitude/longitude values. If your coordinates are real-world degrees and you need meters, replace `euclidean` in `app/utils/distance.py` with a haversine or projected distance, and keep the KD-tree and radius units consistent.
-- **Query snapping**: the query point is routed from its nearest location node, not from a true point on a road segment.
-- **Link semantics**: undirected by default; set `DIRECTED_LINKS=true` if the linkage file encodes one-way roads. The setting is part of the graph cache identity.
-- **Partial results**: only reachable candidates are returned, so a result may contain fewer than K IDs.
-- **Worst-case traversal**: if fewer than K candidates are reachable, Dijkstra explores the source's whole connected component.
-- **Cache coherence**: the cache key includes graph identity (mtime and size) and an algorithm version. Bump `Settings.algorithm_version` when changing ranking logic.
-- **Memory**: each worker process loads its own graph copy.
-
----
-
-## Troubleshooting
-
-| Symptom                                | Likely cause and fix                                                                |
-| -------------------------------------- | ----------------------------------------------------------------------------------- |
-| Container exits at startup             | Missing or malformed `locations.csv`, or `PRELOAD_LINKS` file not found; check logs |
-| `/ready` returns `503`                 | Still loading; large graphs take longer, tune probe `failureThreshold`              |
-| `404 linkage file not found`           | `link` must be a file name inside `DATA_DIR`; verify the volume mount               |
-| Fewer than K results                   | Not enough category locations within `rad`, or unreachable in the graph             |
-| `/metrics` counters look low           | Ensure `PROMETHEUS_MULTIPROC_DIR` is set and writable in every worker               |
-| Slow first request after a data update | Linkage file changed; the graph is rebuilt once. Redeploy to pre-warm               |
-| Results differ between replicas        | Different dataset versions mounted; align data and redeploy                         |
-
----
-
-## Contributing
-
-1. Fork and create a feature branch.
-2. `make install && make data`.
-3. Add or update tests alongside your change.
-4. Run `make lint test` and make sure both pass.
-5. Open a pull request describing the behavior change.
 
 ---
 
 ## License
 
 Released under the [MIT License](LICENSE). Copyright (c) 2026 Ashutosh Kumar Jha.
+
+Source: <https://github.com/ashutosh229/proximity_search>
